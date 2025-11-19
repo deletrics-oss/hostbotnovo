@@ -1,5 +1,3 @@
-
-// services/whatsappManager.js (Versão 2.9.3 - QR Watchdog)
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const qrcode = require("qrcode");
@@ -9,271 +7,174 @@ const { logger } = require("./logger");
 
 let genAI;
 if (process.env.GEMINI_API_KEY) {
-    try {
-        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    } catch (error) {
-        logger.error("Erro ao inicializar Gemini:", error);
-    }
+    try { genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY); } 
+    catch (e) { logger.error("Erro Gemini", e); }
 }
 
 const sessions = {};
 let wss;
 const pausedChats = {};
 
-function setWss(webSocketServer) { wss = webSocketServer; }
+function setWss(s) { wss = s; }
+function broadcast(e) { if(wss) wss.clients.forEach(c => c.readyState === 1 && c.send(JSON.stringify(e))); }
 
-function broadcastEvent(event) {
-    if (!wss) return;
-    const data = JSON.stringify(event);
-    wss.clients.forEach(client => { if (client.readyState === client.OPEN) client.send(data); });
-}
-
-function runRuleBasedEngine(message, sessionId) {
-    const logicDir = path.join("uploads", sessionId);
-    if (!fs.existsSync(logicDir)) return { handled: false };
-    const files = fs.readdirSync(logicDir);
-    const jsonFile = files.find(f => f.endsWith(".json"));
-    if (!jsonFile) return { handled: false };
-
+function runRules(msg, id) {
+    const dir = path.join("uploads", id);
+    if (!fs.existsSync(dir)) return { handled: false };
+    const f = fs.readdirSync(dir).find(x => x.endsWith(".json"));
+    if (!f) return { handled: false };
+    
     try {
-        const filePath = path.join(logicDir, jsonFile);
-        const logicData = JSON.parse(fs.readFileSync(filePath, "utf8"));
-        const userMessage = message.body.toLowerCase().trim();
-
-        for (const rule of logicData.rules) {
-            const foundKeyword = rule.keywords.find(keyword => userMessage.includes(keyword.toLowerCase()));
-            if (foundKeyword) {
-                logger.log(`[${sessionId}] Regra encontrada para keyword: "${foundKeyword}"`);
-                return {
-                    handled: true,
-                    reply: rule.reply,
-                    shouldPause: rule.pause_bot_after_reply === true,
-                    image_url: rule.image_url || null
-                };
+        const data = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+        const txt = msg.body.toLowerCase();
+        for (const r of data.rules) {
+            if (r.keywords.some(k => txt.includes(k.toLowerCase()))) {
+                return { handled: true, reply: r.reply, pause: r.pause_bot_after_reply, img: r.image_url };
             }
         }
-        if (logicData.default_reply) {
-            const txtFile = files.find(f => f.endsWith(".txt"));
-            if (!txtFile) {
-                 return { handled: true, reply: logicData.default_reply, shouldPause: false, image_url: null };
-            }
+        if (data.default_reply && !fs.readdirSync(dir).some(x => x.endsWith(".txt"))) {
+             return { handled: true, reply: data.default_reply, pause: false };
         }
-    } catch (error) {
-        logger.error(`[${sessionId}] Erro ao processar regras JSON:`, error);
-    }
+    } catch (e) { logger.error(`[${id}] Erro JSON`, e); }
     return { handled: false };
 }
 
-function createSession(sessionId) {
-    if (sessions[sessionId] && sessions[sessionId].status !== "DESTROYING") {
-        return;
-    }
-
-    logger.log(`[WhatsappManager] Iniciando sessão: ${sessionId}`);
+function createSession(id) {
+    if (sessions[id] && sessions[id].status !== 'DESTROYING') return;
+    logger.log(`[Bot] Iniciando ${id}`);
     
     const client = new Client({
-        authStrategy: new LocalAuth({ clientId: sessionId }),
-        puppeteer: {
-            headless: true,
-            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-accelerated-2d-canvas", "--no-first-run", "--no-zygote", "--disable-gpu"]
-        }
+        authStrategy: new LocalAuth({ clientId: id }),
+        puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'] }
     });
+    
+    sessions[id] = { client, status: "INITIALIZING", qr: null };
+    pausedChats[id] = [];
+    broadcast({ type: "status_update", sessionId: id, status: "INITIALIZING" });
 
-    sessions[sessionId] = { client, status: "INITIALIZING", qrCode: null, qrAttempts: 0 };
-    pausedChats[sessionId] = [];
-    broadcastEvent({ type: "status_update", sessionId, status: "INITIALIZING" });
-
-    // --- WATCHDOG DO QR CODE ---
-    // Se em 40 segundos não tiver conectado ou gerado QR, reinicia
-    const qrTimeout = setTimeout(() => {
-        if (sessions[sessionId] && sessions[sessionId].status === "INITIALIZING") {
-            logger.warn(`[${sessionId}] Watchdog: QR Code demorou muito. Reiniciando...`);
-            destroySession(sessionId).then(() => createSession(sessionId));
+    // Watchdog
+    const timer = setTimeout(() => {
+        if (sessions[id] && sessions[id].status === "INITIALIZING") {
+            logger.warn(`[${id}] QR demorou. Reiniciando.`);
+            destroySession(id).then(() => createSession(id));
         }
     }, 40000);
 
     client.on("qr", (qr) => {
-        clearTimeout(qrTimeout); // QR chegou, cancela watchdog
-        logger.log(`[${sessionId}] QR Code gerado.`);
-        sessions[sessionId].status = "QR_PENDING";
-        qrcode.toDataURL(qr, (err, url) => { 
-            if (!err) {
-                sessions[sessionId].qrCode = url;
-                broadcastEvent({ type: "status_update", sessionId, status: "QR_PENDING", qrCode: url });
+        clearTimeout(timer);
+        sessions[id].status = "QR_PENDING";
+        qrcode.toDataURL(qr, (e, url) => {
+            if (!e) {
+                sessions[id].qr = url;
+                broadcast({ type: "status_update", sessionId: id, status: "QR_PENDING", qrCode: url });
             }
         });
     });
 
     client.on("ready", () => {
-        clearTimeout(qrTimeout); // Conectou, cancela watchdog
-        logger.log(`[${sessionId}] Cliente PRONTO (Conectado).`);
-        sessions[sessionId].status = "READY";
-        sessions[sessionId].qrCode = null;
-        broadcastEvent({ type: "status_update", sessionId, status: "READY" });
+        clearTimeout(timer);
+        sessions[id].status = "READY";
+        sessions[id].qr = null;
+        broadcast({ type: "status_update", sessionId: id, status: "READY" });
     });
 
-    client.on("auth_failure", (msg) => {
-        clearTimeout(qrTimeout);
-        logger.error(`[${sessionId}] Falha na autenticação:`, msg);
-        sessions[sessionId].status = "ERROR";
-        broadcastEvent({ type: "status_update", sessionId, status: "ERROR" });
+    client.on("disconnected", () => {
+        clearTimeout(timer);
+        sessions[id].status = "DISCONNECTED";
+        broadcast({ type: "status_update", sessionId: id, status: "DISCONNECTED" });
+        destroySession(id);
     });
 
-    client.on("disconnected", (reason) => {
-        clearTimeout(qrTimeout);
-        logger.warn(`[${sessionId}] Cliente desconectado:`, reason);
-        if (sessions[sessionId]) sessions[sessionId].status = "DISCONNECTED";
-        broadcastEvent({ type: "status_update", sessionId, status: "DISCONNECTED" });
-        destroySession(sessionId);
-    });
-
-    client.on("message", async (message) => {
-        const userNumber = message.from;
-        if (userNumber.endsWith("@g.us") || message.isStatus || message.fromMe) return;
-
-        const sessionPausedChats = pausedChats[sessionId] || [];
-        const isPaused = sessionPausedChats.includes(userNumber);
-        const userMessageLower = message.body.toLowerCase().trim();
-        const unpauseKeywords = ["menu", "ajuda", "inicio", "voltar", "sair", "0"];
-
-        if (isPaused) {
-            if (unpauseKeywords.includes(userMessageLower)) {
-                pausedChats[sessionId] = sessionPausedChats.filter(id => id !== userNumber);
-                logger.log(`[${sessionId}] Chat ${userNumber} REATIVADO.`);
-            } else {
-                return;
-            }
-        }
+    client.on("message", async (msg) => {
+        const from = msg.from;
+        if (from.endsWith("@g.us") || msg.isStatus || msg.fromMe) return;
         
-        const ruleResult = runRuleBasedEngine(message, sessionId);
-        if (ruleResult.handled) {
-            broadcastEvent({ type: "new_message", sessionId, from: userNumber, body: message.body, timestamp: new Date().toISOString() });
-
-            if (ruleResult.image_url) {
-                try {
-                    const media = await MessageMedia.fromUrl(ruleResult.image_url, { unsafeMime: true });
-                    await client.sendMessage(userNumber, media, { caption: ruleResult.reply });
-                    broadcastEvent({ type: "new_message", sessionId, from: "BOT", to: userNumber, body: `[Imagem] ${ruleResult.reply}`, timestamp: new Date().toISOString() });
-                } catch (imgError) {
-                    await message.reply(ruleResult.reply);
-                    broadcastEvent({ type: "new_message", sessionId, from: "BOT", to: userNumber, body: ruleResult.reply, timestamp: new Date().toISOString() });
-                }
-            } else {
-                await message.reply(ruleResult.reply);
-                broadcastEvent({ type: "new_message", sessionId, from: "BOT", to: userNumber, body: ruleResult.reply, timestamp: new Date().toISOString() });
-            }
-
-            if (ruleResult.shouldPause) {
-                if (!pausedChats[sessionId].includes(userNumber)) pausedChats[sessionId].push(userNumber);
+        // Unpause logic
+        if (pausedChats[id].includes(from)) {
+            if (["menu", "voltar", "0"].includes(msg.body.toLowerCase().trim())) {
+                pausedChats[id] = pausedChats[id].filter(x => x !== from);
+                await client.sendMessage(from, "Bot reativado.");
             }
             return;
         }
 
-        broadcastEvent({ type: "new_message", sessionId, from: userNumber, body: message.body, timestamp: new Date().toISOString() });
-        
+        const rule = runRules(msg, id);
+        if (rule.handled) {
+            broadcast({ type: "new_message", sessionId: id, from, body: msg.body });
+            if (rule.img) {
+                try {
+                    const m = await MessageMedia.fromUrl(rule.img, { unsafeMime: true });
+                    await client.sendMessage(from, m, { caption: rule.reply });
+                } catch { await msg.reply(rule.reply); }
+            } else {
+                await msg.reply(rule.reply);
+            }
+            broadcast({ type: "new_message", sessionId: id, from: "BOT", to: from, body: rule.reply });
+            if (rule.pause) pausedChats[id].push(from);
+            return;
+        }
+
+        // Gemini
         try {
-            if (!genAI) throw new Error("API do Gemini não configurada.");
+            if (!genAI) return;
+            broadcast({ type: "new_message", sessionId: id, from, body: msg.body });
             
-            let knowledge = "";
-            const logicDir = path.join("uploads", sessionId);
-            if (fs.existsSync(logicDir)) {
-                fs.readdirSync(logicDir).forEach(file => {
-                    if (path.extname(file) === ".txt") knowledge += fs.readFileSync(path.join(logicDir, file), "utf8") + "\n\n";
+            let context = "";
+            const dir = path.join("uploads", id);
+            if (fs.existsSync(dir)) {
+                fs.readdirSync(dir).filter(f => f.endsWith(".txt")).forEach(f => {
+                    context += fs.readFileSync(path.join(dir, f), "utf8") + "\n";
                 });
             }
-            
-            if (!knowledge && !ruleResult.handled) return; 
+            if (!context) return;
 
             const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-            const systemInstruction = `
-                Você é um assistente virtual útil e amigável.
-                Use APENAS o contexto abaixo para responder perguntas sobre a empresa/serviço.
-                Se a resposta não estiver no contexto, diga educadamente que não sabe e sugira falar com um atendente.
-                
-                --- CONTEXTO ---
-                ${knowledge}
-                --- FIM DO CONTEXTO ---
-            `;
-
-            const result = await model.generateContent(`${systemInstruction}\n\nUsuário: ${message.body}`);
-            const textResponse = result.response.text();
-
-            await client.sendMessage(userNumber, textResponse);
-            broadcastEvent({ type: "new_message", sessionId, from: "BOT", to: userNumber, body: textResponse, timestamp: new Date().toISOString() });
-        } catch (error) {
-            logger.error(`[${sessionId}] Erro Gemini:`, error);
-        }
+            const res = await model.generateContent(`Contexto:\n${context}\n\nRespnda ao usuário: ${msg.body}`);
+            const txt = res.response.text();
+            await client.sendMessage(from, txt);
+            broadcast({ type: "new_message", sessionId: id, from: "BOT", to: from, body: txt });
+        } catch (e) { logger.error("Erro Gemini", e); }
     });
 
-    client.initialize().catch(err => {
-        logger.error(`[${sessionId}] Erro init:`, err);
-        sessions[sessionId].status = "ERROR";
-        broadcastEvent({ type: "status_update", sessionId, status: "ERROR" });
+    client.initialize().catch(() => {
+        sessions[id].status = "ERROR";
+        broadcast({ type: "status_update", sessionId: id, status: "ERROR" });
     });
 }
 
-async function destroySession(sessionId) {
-    if (sessions[sessionId]) {
-        logger.log(`[WhatsappManager] Encerrando sessão: ${sessionId}`);
-        sessions[sessionId].status = "DESTROYING";
-        try {
-            await sessions[sessionId].client.destroy();
-        } catch(e) {
-            logger.error(`Erro ao destruir cliente puppeteer para ${sessionId}`, e);
-        }
-        delete sessions[sessionId];
-        delete pausedChats[sessionId];
+async function destroySession(id) {
+    if (sessions[id]) {
+        sessions[id].status = "DESTROYING";
+        try { await sessions[id].client.destroy(); } catch {}
+        delete sessions[id];
     }
-    
-    const authPath = path.join(__dirname, "..", ".wwebjs_auth", `session-${sessionId}`);
-    if (fs.existsSync(authPath)) {
-        try {
-            fs.rmSync(authPath, { recursive: true, force: true });
-            logger.log(`[WhatsappManager] Pasta de autenticação removida para: ${sessionId}`);
-        } catch (err) {
-            logger.error(`Erro ao remover pasta auth para ${sessionId}:`, err);
-        }
-    }
-
-    broadcastEvent({ type: "session_destroyed", sessionId });
+    const p = path.join(__dirname, "..", ".wwebjs_auth", `session-${id}`);
+    if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+    broadcast({ type: "session_destroyed", sessionId: id });
     return true;
 }
 
-const getSessionStatus = (sessionId) => sessions[sessionId]?.status || "OFFLINE";
-const getQRCode = (sessionId) => sessions[sessionId]?.qrCode || null;
-const getAllSessions = async () => {
-    const db = require("./db");
-    // Support both async (Firebase) and sync (Local) return types roughly
-    const savedDevices = await Promise.resolve(db.getDevices()); 
-    const activeDeviceIds = Object.keys(sessions);
-    const allDeviceIds = [...new Set([...savedDevices, ...activeDeviceIds])];
-
-    return allDeviceIds.map(id => ({
-        id: id,
-        status: sessions[id]?.status || "OFFLINE"
-    }));
-};
-
-async function sendMessage(sessionId, number, text) {
-    const client = sessions[sessionId]?.client;
-    if (client && sessions[sessionId].status === "READY") {
-        const chatId = number.includes("@") ? number : `${number.replace(/\D/g, "")}@c.us`;
-        await client.sendMessage(chatId, text);
-        broadcastEvent({ type: "new_message", sessionId, from: "ADMIN", to: chatId, body: text, timestamp: new Date().toISOString() });
+async function sendMessage(id, to, txt) {
+    if (sessions[id] && sessions[id].status === "READY") {
+        const dest = to.includes("@") ? to : `${to.replace(/\D/g,"")}@c.us`;
+        await sessions[id].client.sendMessage(dest, txt);
+        broadcast({ type: "new_message", sessionId: id, from: "ADMIN", to: dest, body: txt });
         return true;
     }
     return false;
 }
 
-async function checkGeminiHealth() {
-    if (!genAI) return { status: "ERROR", message: "API Key missing" };
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        await model.generateContent("ping");
-        return { status: "OPERATIONAL" };
-    } catch (error) {
-        return { status: "ERROR", message: error.message };
-    }
-}
+const getQRCode = (id) => sessions[id]?.qr;
+const getAllSessions = () => {
+    const saved = require("./db").getDevices();
+    const active = Object.keys(sessions);
+    const all = [...new Set([...saved, ...active])];
+    return all.map(id => ({ id, status: sessions[id]?.status || "OFFLINE" }));
+};
+const checkGeminiHealth = async () => {
+    if(!genAI) return { status: "ERROR" };
+    try { await genAI.getGenerativeModel({model:"gemini-2.5-flash"}).generateContent("ping"); return {status: "OPERATIONAL"}; }
+    catch(e) { return { status: "ERROR", msg: e.message }; }
+};
 
-module.exports = { setWss, createSession, getSessionStatus, getQRCode, getAllSessions, destroySession, sendMessage, checkGeminiHealth };
+module.exports = { setWss, createSession, destroySession, getQRCode, getAllSessions, sendMessage, checkGeminiHealth };

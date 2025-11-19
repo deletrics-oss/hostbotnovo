@@ -1,9 +1,8 @@
-
 const fs = require("fs");
 const path = require("path");
 const { logger } = require("./logger");
 
-// Use process.cwd() to ensure we write to the root of the project where PM2 runs
+// Ensure we use the root directory for persistence
 const DB_PATH = path.join(process.cwd(), "database.json");
 
 const DEFAULT_ADMIN = {
@@ -12,7 +11,7 @@ const DEFAULT_ADMIN = {
     email: 'admin@chatbot.com',
     password: 'suporte@1',
     role: 'admin',
-    plan: 'prod_TSBFAZOMsCNIAT' // Plano Bot Fixo
+    plan: 'prod_TSBFAZOMsCNIAT'
 };
 
 const INITIAL_DATA = {
@@ -24,13 +23,13 @@ const db = {
     read: () => {
         try {
             if (!fs.existsSync(DB_PATH)) {
-                logger.warn("[DB] Arquivo não encontrado. Criando novo database.json...");
+                logger.warn("[DB] Criando novo database.json...");
                 db.write(INITIAL_DATA);
                 return INITIAL_DATA;
             }
             const content = fs.readFileSync(DB_PATH, "utf8");
             if (!content || content.trim() === "") {
-                logger.warn("[DB] Arquivo vazio. Resetando database.json...");
+                logger.warn("[DB] Arquivo vazio. Resetando...");
                 db.write(INITIAL_DATA);
                 return INITIAL_DATA;
             }
@@ -39,29 +38,27 @@ const db = {
             try {
                 parsed = JSON.parse(content);
             } catch (e) {
-                logger.error("[DB] JSON Corrompido. Resetando base de dados.", e);
+                logger.error("[DB] JSON Corrompido. Resetando.", e);
                 db.write(INITIAL_DATA);
                 return INITIAL_DATA;
             }
             
-            // Self-healing: Ensure structure exists
             let dirty = false;
             if (!Array.isArray(parsed.users)) { parsed.users = [DEFAULT_ADMIN]; dirty = true; }
             if (!Array.isArray(parsed.devices)) { parsed.devices = []; dirty = true; }
             
-            // Ensure Admin Always Exists
-            const adminExists = parsed.users.some(u => u.email === 'admin@chatbot.com' || u.name === 'admin');
+            // Self-Healing: Ensure Admin Exists
+            const adminExists = parsed.users.some(u => u.name.toLowerCase() === 'admin');
             if (!adminExists) {
-                logger.warn("[DB] Admin não encontrado. Recriando usuário admin...");
+                logger.warn("[DB] Restaurando usuário Admin...");
                 parsed.users.unshift(DEFAULT_ADMIN);
                 dirty = true;
             }
 
             if (dirty) db.write(parsed);
-            
             return parsed;
         } catch (error) {
-            logger.error("[DB] Erro crítico na leitura.", error);
+            logger.error("[DB] Erro crítico.", error);
             return INITIAL_DATA;
         }
     },
@@ -69,7 +66,7 @@ const db = {
         try {
             fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), "utf8");
         } catch (error) {
-            logger.error("[DB] Erro crítico na escrita.", error);
+            logger.error("[DB] Erro de escrita.", error);
         }
     },
     addDevice: (sessionId) => {
@@ -86,15 +83,10 @@ const db = {
         db.write(data);
         logger.log(`[DB] Dispositivo removido: ${sessionId}`);
     },
-    getDevices: () => {
-        return db.read().devices;
-    },
-    getUsers: () => {
-        return db.read().users;
-    },
+    getDevices: () => db.read().devices,
+    getUsers: () => db.read().users,
     addUser: (user) => {
         const data = db.read();
-        // Simple ID generation
         const newId = data.users.length > 0 ? Math.max(...data.users.map(u => u.id)) + 1 : 1;
         const newUser = { ...user, id: newId };
         data.users.push(newUser);
@@ -105,7 +97,7 @@ const db = {
         const data = db.read();
         const idx = data.users.findIndex(u => u.id == userId);
         if (idx > -1) {
-            if (data.users[idx].name === 'admin') return false; // Cannot delete master admin
+            if (data.users[idx].name === 'admin') return false;
             data.users.splice(idx, 1);
             db.write(data);
             return true;
@@ -115,9 +107,9 @@ const db = {
     findUser: (usernameOrEmail, password) => {
         const users = db.read().users;
         return users.find(u => {
-            const isNameMatch = u.name && u.name.toLowerCase() === usernameOrEmail.toLowerCase();
-            const isEmailMatch = u.email && u.email.toLowerCase() === usernameOrEmail.toLowerCase();
-            return (isNameMatch || isEmailMatch) && u.password === password;
+            const isName = u.name && u.name.toLowerCase() === usernameOrEmail.toLowerCase();
+            const isEmail = u.email && u.email.toLowerCase() === usernameOrEmail.toLowerCase();
+            return (isName || isEmail) && u.password === password;
         });
     }
 };

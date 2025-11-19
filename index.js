@@ -1,4 +1,3 @@
-
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -11,7 +10,7 @@ const { setWss: setWhatsappWss } = require("./services/whatsappManager");
 const { setWss: setLoggerWss, logger } = require("./services/logger");
 
 const app = express();
-// Use PORT 3034 explicitly as requested
+// Force Port 3034
 const PORT = process.env.PORT || 3034;
 
 app.use(cors());
@@ -20,24 +19,28 @@ app.use(express.json());
 // API Routes
 app.use("/api", require("./routes/api"));
 
-// Serve Static Frontend (React Build)
-// Ensure you run 'npm run build' in React and copy 'dist' or 'build' content to 'public' folder on server
+// Serve Static Frontend (The 'public' folder is created by 'npm run build')
 app.use(express.static(path.join(__dirname, "public")));
 
-// Catch-all for React Router
+// Handle React Routing (Any request not starting with /api goes to index.html)
 app.get("*", (req, res) => {
   if (req.path.startsWith('/api')) {
       return res.status(404).json({ error: 'API Endpoint Not Found' });
   }
-  // If public/index.html exists, serve it. Otherwise send a basic status.
+  
   const indexPath = path.join(__dirname, "public", "index.html");
   if (require("fs").existsSync(indexPath)) {
       res.sendFile(indexPath);
   } else {
-      res.send(`
-        <h1>ChatBot Host v2.5 Online</h1>
-        <p>Backend running on port ${PORT}.</p>
-        <p>Para ver o painel, faça o build do React e coloque na pasta 'public'.</p>
+      res.status(404).send(`
+        <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>ChatBot Host v2.5 - Backend Online</h1>
+            <p>O servidor está rodando na porta <strong>${PORT}</strong>.</p>
+            <hr/>
+            <h3>⚠️ O Painel não foi encontrado.</h3>
+            <p>Para corrigir, execute este comando no terminal do servidor:</p>
+            <code style="background: #eee; padding: 10px; display: block; margin: 20px auto; max-width: 200px;">npm run build</code>
+        </div>
       `);
   }
 });

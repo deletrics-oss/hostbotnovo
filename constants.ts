@@ -1,22 +1,12 @@
-
 import { Device, Conversation, ConnectionStatus } from './types';
 
-// --- API URL Configuration ---
-// 1. Check for user manual override in localStorage
-// 2. If localhost/preview, use the explicit Server IP (Port 3034)
-// 3. If production (deployed on same server), use relative path '/api'
-const isLocalEnv = typeof window !== 'undefined' && (
-    window.location.hostname === 'localhost' || 
-    window.location.hostname.includes('stackblitz') || 
-    window.location.hostname.includes('google')
-);
-
-// ATENÇÃO: URL Externa do seu servidor VPS
-const REMOTE_SERVER_URL = 'http://72.60.246.250:3034/api'; 
-
-export const API_BASE_URL = 
-    (typeof window !== 'undefined' && localStorage.getItem('custom_api_url')) || 
-    (isLocalEnv ? REMOTE_SERVER_URL : '/api');
+// AUTOMATIC API URL DETECTION
+// In production (after 'npm run build'), this will use relative path '/api'
+// This avoids CORS issues and HTTPS/HTTP mixed content errors entirely.
+const isDevelopment = (import.meta as any).env.DEV;
+export const API_BASE_URL = isDevelopment 
+    ? (localStorage.getItem('custom_api_url') || 'http://localhost:3034/api') 
+    : '/api';
 
 export const INITIAL_DEVICES: Device[] = [];
 
