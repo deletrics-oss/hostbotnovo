@@ -1,0 +1,5 @@
+{
+  "name": "ChatBot Host v2.5",
+  "description": "A comprehensive WhatsApp Bot management dashboard with Gemini AI integration and Stripe subscription support.",
+  "requestFramePermissions": []
+}
