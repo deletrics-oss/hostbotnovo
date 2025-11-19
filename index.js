@@ -20,7 +20,10 @@ app.use(express.json());
 app.use("/api", require("./routes/api"));
 
 // Serve Static Frontend (The 'public' folder is created by 'npm run build')
-app.use(express.static(path.join(__dirname, "public")));
+const publicPath = path.join(__dirname, "public");
+if (require("fs").existsSync(publicPath)) {
+    app.use(express.static(publicPath));
+}
 
 // Handle React Routing (Any request not starting with /api goes to index.html)
 app.get("*", (req, res) => {
