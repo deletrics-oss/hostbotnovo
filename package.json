@@ -1,12 +1,12 @@
 {
   "name": "whatsapp-dashboard-persistent",
-  "version": "2.9.5",
+  "version": "2.9.6",
   "description": "Dashboard WhatsApp + Gemini AI",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
