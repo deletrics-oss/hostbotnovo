@@ -1,10 +1,9 @@
 
-// services/db.js
 const fs = require("fs");
 const path = require("path");
 const { logger } = require("./logger");
 
-// Configuração do caminho local
+// Use process.cwd() to ensure we write to the root of the project where PM2 runs
 const DB_PATH = path.join(process.cwd(), "database.json");
 
 const DEFAULT_ADMIN = {
@@ -13,7 +12,7 @@ const DEFAULT_ADMIN = {
     email: 'admin@chatbot.com',
     password: 'suporte@1',
     role: 'admin',
-    plan: 'prod_TSBFAZOMsCNIAT'
+    plan: 'prod_TSBFAZOMsCNIAT' // Plano Bot Fixo
 };
 
 const INITIAL_DATA = {
@@ -21,34 +20,48 @@ const INITIAL_DATA = {
     users: [DEFAULT_ADMIN]
 };
 
-// --- FUNÇÕES LOCAIS (JSON) ---
-const localDB = {
+const db = {
     read: () => {
         try {
             if (!fs.existsSync(DB_PATH)) {
-                localDB.write(INITIAL_DATA);
+                logger.warn("[DB] Arquivo não encontrado. Criando novo database.json...");
+                db.write(INITIAL_DATA);
                 return INITIAL_DATA;
             }
             const content = fs.readFileSync(DB_PATH, "utf8");
             if (!content || content.trim() === "") {
-                localDB.write(INITIAL_DATA);
+                logger.warn("[DB] Arquivo vazio. Resetando database.json...");
+                db.write(INITIAL_DATA);
                 return INITIAL_DATA;
             }
-            const parsed = JSON.parse(content);
             
-            // Self-healing
-            if (!Array.isArray(parsed.users)) parsed.users = [DEFAULT_ADMIN];
-            if (!parsed.devices) parsed.devices = [];
-            
-            const adminExists = parsed.users.some(u => u.name === 'admin' || u.email === 'admin@chatbot.com');
-            if (!adminExists) {
-                parsed.users.unshift(DEFAULT_ADMIN);
-                localDB.write(parsed);
+            let parsed;
+            try {
+                parsed = JSON.parse(content);
+            } catch (e) {
+                logger.error("[DB] JSON Corrompido. Resetando base de dados.", e);
+                db.write(INITIAL_DATA);
+                return INITIAL_DATA;
             }
+            
+            // Self-healing: Ensure structure exists
+            let dirty = false;
+            if (!Array.isArray(parsed.users)) { parsed.users = [DEFAULT_ADMIN]; dirty = true; }
+            if (!Array.isArray(parsed.devices)) { parsed.devices = []; dirty = true; }
+            
+            // Ensure Admin Always Exists
+            const adminExists = parsed.users.some(u => u.email === 'admin@chatbot.com' || u.name === 'admin');
+            if (!adminExists) {
+                logger.warn("[DB] Admin não encontrado. Recriando usuário admin...");
+                parsed.users.unshift(DEFAULT_ADMIN);
+                dirty = true;
+            }
+
+            if (dirty) db.write(parsed);
+            
             return parsed;
         } catch (error) {
-            console.error("[DB] Local DB corrupto. Resetando.");
-            localDB.write(INITIAL_DATA);
+            logger.error("[DB] Erro crítico na leitura.", error);
             return INITIAL_DATA;
         }
     },
@@ -56,61 +69,57 @@ const localDB = {
         try {
             fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), "utf8");
         } catch (error) {
-            console.error("Erro escrita DB local:", error);
+            logger.error("[DB] Erro crítico na escrita.", error);
         }
-    }
-};
-
-// --- INTERFACE UNIFICADA ---
-const db = {
-    getDevices: () => {
-        return localDB.read().devices;
     },
     addDevice: (sessionId) => {
-        const data = localDB.read();
+        const data = db.read();
         if (!data.devices.includes(sessionId)) {
             data.devices.push(sessionId);
-            localDB.write(data);
+            db.write(data);
+            logger.log(`[DB] Dispositivo salvo: ${sessionId}`);
         }
     },
     removeDevice: (sessionId) => {
-        const data = localDB.read();
+        const data = db.read();
         data.devices = data.devices.filter(d => d !== sessionId);
-        localDB.write(data);
+        db.write(data);
+        logger.log(`[DB] Dispositivo removido: ${sessionId}`);
+    },
+    getDevices: () => {
+        return db.read().devices;
     },
     getUsers: () => {
-        return localDB.read().users;
+        return db.read().users;
     },
     addUser: (user) => {
-        const data = localDB.read();
+        const data = db.read();
+        // Simple ID generation
         const newId = data.users.length > 0 ? Math.max(...data.users.map(u => u.id)) + 1 : 1;
         const newUser = { ...user, id: newId };
         data.users.push(newUser);
-        localDB.write(data);
+        db.write(data);
         return newUser;
     },
     removeUser: (userId) => {
-        const data = localDB.read();
+        const data = db.read();
         const idx = data.users.findIndex(u => u.id == userId);
         if (idx > -1) {
-            if (data.users[idx].name === 'admin') return false; // Proteção admin
+            if (data.users[idx].name === 'admin') return false; // Cannot delete master admin
             data.users.splice(idx, 1);
-            localDB.write(data);
+            db.write(data);
             return true;
         }
         return false;
     },
     findUser: (usernameOrEmail, password) => {
-        const users = localDB.read().users;
+        const users = db.read().users;
         return users.find(u => {
-            const isMatch = (u.name.toLowerCase() === usernameOrEmail.toLowerCase() || u.email.toLowerCase() === usernameOrEmail.toLowerCase());
-            return isMatch && u.password === password;
+            const isNameMatch = u.name && u.name.toLowerCase() === usernameOrEmail.toLowerCase();
+            const isEmailMatch = u.email && u.email.toLowerCase() === usernameOrEmail.toLowerCase();
+            return (isNameMatch || isEmailMatch) && u.password === password;
         });
     }
 };
 
-module.exports = {
-    ...db,
-    readSync: localDB.read,
-    writeSync: localDB.write
-};
+module.exports = db;
