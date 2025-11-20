@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-dashboard-persistent",
-  "version": "2.9.6",
+  "version": "2.9.7",
   "description": "Dashboard WhatsApp + Gemini AI",
   "main": "index.js",
   "scripts": {
